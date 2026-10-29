@@ -48,6 +48,7 @@ def parse():
     ap.add_argument("--no-idmap-import", action="store_true")
     ap.add_argument("--base-lang", default=config.BASE_LANG)
     ap.add_argument("--force-version", action="store_true", help="Odoo version check ignore karo")
+    ap.add_argument("--force-masters", action="store_true")
     ap.add_argument("--force-idmap", action="store_true", help="idmap sanity check ignore karo")
     ap.add_argument("--out", default="idmap_after_tx.json")
     return ap.parse_args()
@@ -109,12 +110,12 @@ def main():
         for n in S.ORDER:
             sp = S.SPECS[n]
             print("%-16s %-8s %s%s" % (n, sp.group, sp.desc, "   [core]" if n in S.CORE else ""))
-        print("\ngroups: core | hr | pos | all")
+        print("\ngroups: masters | core | hr | pos | all")
         return
     write = args.cmd in ("check", "run", "rollback") and (args.apply or args.cmd == "run" or (args.cmd == "check" and args.fix))
     if args.cmd in ("run", "rollback") or (args.cmd == "check" and args.fix):
         guard_apply(args) if args.apply else None
-    src, dst = connect(args, write=write or args.cmd in ("run", "verify", "export-idmap"))
+    src, dst = connect(args, write=write or args.cmd in ("run", "verify", "export-idmap", "check", "rollback"))
     eng = Engine(src, dst, args, create_tables=(args.cmd in ("run", "check", "rollback", "export-idmap", "verify")))
     eng.pending_ok = S.models_in_specs()
     t0 = time.time()
@@ -135,9 +136,11 @@ def main():
             S.cmd_check(eng, args.fix)
             if args.fix and args.apply:
                 dst.cx.commit()
-            elif args.fix:
+                log.info("maps commit ho gaye")
+            else:
                 dst.cx.rollback()
-                log.info("DRY-RUN tha: maps commit nahi hue. --apply --confirm-db %s se dobara chalao", config.DST["dbname"])
+                if args.fix:
+                    log.info("DRY-RUN tha: maps commit nahi hue. --apply --confirm-db %s se dobara chalao", config.DST["dbname"])
             eng.write_reports("check")
             return
         if args.cmd == "export-idmap":
@@ -160,6 +163,13 @@ def main():
             return
         # ---- run
         warn_active_sessions(dst)
+        if args.apply and not args.force_masters and any(n in S.CORE for n in steps):
+            bad = S.preflight(eng)
+            if bad:
+                for b in bad:
+                    log.error("MASTERS ADHOORE: %s", b)
+                sys.exit("Zaroori masters map nahi hue. Pehle masters migrate karo (run_migration.sh) aur 'check --fix --apply', "
+                         "phir dobara. (--force-masters se bypass, SIFARISH NAHI)")
         log.info("steps: %s | %s", ", ".join(steps), "APPLY (commit hoga)" if args.apply else
                  "DRY-RUN (aakhir mein ROLLBACK; id sequences phir bhi aage badh jati hain)")
         for name in steps:

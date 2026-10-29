@@ -779,9 +779,10 @@ class Engine:
             pcs[ch] = self.build_plan(ch.model, ch.dst_model, ch.rename, set(ch.skip) | {ch.fk},
                                       drop_dst_cols={fk_dc}, src_table=cst, dst_table=cdt)
             pcs[ch].fk_dc = fk_dc
+            pcs[ch].missing_required = [c for c in pcs[ch].missing_required if c != fk_dc]
         self.report_plan(spec, ph, pcs)
         ids = self.select_ids(spec, st)
-        done = self.idmap.done(smodel)
+        done = self.idmap.done(smodel) | set(self.xmlid_map(smodel))
         todo = [i for i in ids if i not in done]
         if self.args.limit:
             todo = todo[:self.args.limit]

@@ -28,11 +28,27 @@ def _locked_state(ctx, table, vals, row, done_to):
     return vals
 
 
+def pick_sel(ctx, model, field, prefs):
+    allowed = ctx.dst.selection(model, field)
+    for p in prefs:
+        if p in allowed:
+            return p
+    return sorted(allowed)[0] if allowed else None
+
+
+def _tax_mode(ctx, table, model, vals):
+    if ctx.has(table, "document_tax_mode") and vals.get("document_tax_mode") is None:
+        vals["document_tax_mode"] = pick_sel(ctx, model, "document_tax_mode", ["tax_excluded", "excluded", "line"])
+    return vals
+
+
 def hook_sale_order(row, vals, ctx):
+    vals = _tax_mode(ctx, "sale_order", "sale.order", vals)
     return _locked_state(ctx, "sale_order", vals, row, "sale")
 
 
 def hook_purchase_order(row, vals, ctx):
+    vals = _tax_mode(ctx, "purchase_order", "purchase.order", vals)
     return _locked_state(ctx, "purchase_order", vals, row, "purchase")
 
 
@@ -103,6 +119,8 @@ def _posted_names(ctx):
 
 
 def hook_move(row, vals, ctx):
+    if ctx.has("account_move", "review_state") and vals.get("review_state") is None:
+        vals["review_state"] = pick_sel(ctx, "account.move", "review_state", ["no", "none", "done", "reviewed"])
     """Odoo 20: posted move ka naam journal mein unique. Odoo 16 mein invoice/refund ka naam same ho sakta tha."""
     if row.get("state") != "posted" or not vals.get("name") or vals["name"] == "/":
         return vals
@@ -129,6 +147,32 @@ def post_move(row, did, ctx):
     for i, t in enumerate(list(eng.renamed)):
         if t[0] == row["id"] and t[1] is None:
             eng.renamed[i] = (t[0], did, t[2], t[3])
+
+
+def _from_move(vals, ctx, table, fields):
+    m = ctx.dst.q1("select date, journal_id, company_id, state from account_move where id = %s", (vals.get("move_id"),))
+    if not m:
+        return None
+    for f in fields:
+        if f in ctx.dst.columns(table) and vals.get(f) is None:
+            vals[f] = m[f]
+    return m
+
+
+def hook_payment(row, vals, ctx):
+    m = _from_move(vals, ctx, "account_payment", ["date", "journal_id", "company_id"])
+    if m is None:
+        return None
+    if ctx.has("account_payment", "state") and vals.get("state") is None:
+        want = {"draft": "draft", "cancel": "canceled"}.get(m["state"]) or ("paid" if row.get("is_matched") else "in_process")
+        allowed = ctx.dst.selection("account.payment", "state")
+        vals["state"] = want if (not allowed or want in allowed) else pick_sel(ctx, "account.payment", "state", ["paid", "posted"])
+    return vals
+
+
+def hook_statement_line(row, vals, ctx):
+    m = _from_move(vals, ctx, "account_bank_statement_line", ["journal_id", "company_id", "date"])
+    return vals if m else None
 
 
 def hook_pos_order(row, vals, ctx):
@@ -172,12 +216,12 @@ add(Spec("moves", "account.move", "Invoices, bills, journal entries (lines ke sa
                          extra_read=["tax_line_id", "account_id", "display_type"])]))
 
 add(Spec("payments", "account.payment", "Payments (migrated move se link)", strict=["partner_id", "journal_id", "move_id"],
-         date_col=("date", False), compare=["amount"], batch=500))
+         hook=hook_payment, extra_read=["is_matched"], date_col=("date", False), compare=["amount"], batch=500))
 
 add(Spec("statement_lines", "account.bank.statement.line", "Bank statement lines (migrated move se link)",
-         strict=["journal_id", "move_id"], date_col=("date", False), batch=500))
+         strict=["journal_id", "move_id"], hook=hook_statement_line, date_col=("date", False), batch=500))
 
-add(Spec("analytic", "account.analytic.line", "Analytic lines", date_col=("date", False), batch=1000))
+add(Spec("analytic", "account.analytic.line", "Analytic lines", strict=["account_id"], date_col=("date", False), batch=1000))
 
 add(Spec("attendance", "hr.attendance", "Attendance", strict=["employee_id"], date_col=("check_in", True), batch=1000,
          group="hr"))
@@ -200,6 +244,76 @@ add(Spec("pos_orders", "pos.order", "POS orders + lines + payments", strict=["pa
          sel_map={"state": {"invoiced": "done"}},
          children=[Child("pos.order.line", "order_id", strict=["product_id"], hook=hook_pos_line),
                    Child("pos.payment", "pos_order_id", strict=["payment_method_id"])]))
+
+
+# ============================================================================ MASTERS (direct DB)
+def hook_partner(row, vals, ctx):
+    """Odoo 20 mein 'mobile' nahi: phone khali ho to mobile wahan, warna notes/comment mein"""
+    if row.get("mobile") and not ctx.has("res_partner", "mobile"):
+        if not vals.get("phone"):
+            vals["phone"] = row["mobile"]
+    return vals
+
+
+def hook_product_tmpl(row, vals, ctx):
+    """16: detailed_type 'product' = storable. 20: type='consu' + is_storable"""
+    dt = row.get("detailed_type") or row.get("type")
+    if ctx.has("product_template", "is_storable") and vals.get("is_storable") is None:
+        vals["is_storable"] = (dt == "product")
+    if row.get("type") == "product":
+        vals["type"] = "consu"
+    return vals
+
+
+def hook_uom(row, vals, ctx):
+    """Odoo 20: category/factor_inv ki jagah relative_factor + relative_uom_id"""
+    if ctx.has("uom_uom", "relative_factor"):
+        if row.get("uom_type") == "reference":
+            vals["relative_factor"] = 1.0
+        else:
+            f = row.get("factor_inv") or (1.0 / row["factor"] if row.get("factor") else 1.0)
+            vals["relative_factor"] = float(f)
+            if ctx.has("uom_uom", "relative_uom_id"):
+                ref = ctx.src.q1("select id from uom_uom where category_id = %s and uom_type = 'reference' limit 1",
+                                 (row.get("category_id"),))
+                vals["relative_uom_id"] = ctx.resolve("uom.uom", ref["id"]) if ref else None
+    return vals
+
+
+M = lambda *a, **k: add(Spec(*a, group="masters", **k))   # noqa
+
+M("m_partner_cat", "res.partner.category", "Partner tags")
+M("m_partner_industry", "res.partner.industry", "Partner industries")
+M("m_partner", "res.partner", "Partners (customers/vendors) + props (receivable/payable...)", hook=hook_partner,
+  extra_read=["mobile"], batch=500)
+M("m_uom", "uom.uom", "Units of measure", hook=hook_uom, extra_read=["uom_type", "factor", "factor_inv", "category_id"],
+  where="uom_type = 'reference'")
+M("m_uom2", "uom.uom", "Units of measure (non-reference)", hook=hook_uom,
+  extra_read=["uom_type", "factor", "factor_inv", "category_id"], where="uom_type <> 'reference'")
+M("m_prod_category", "product.category", "Product categories + props (income/expense/valuation accounts)")
+M("m_pos_category", "pos.category", "POS categories")
+M("m_analytic_plan", "account.analytic.plan", "Analytic plans")
+M("m_analytic_account", "account.analytic.account", "Analytic accounts")
+M("m_attribute", "product.attribute", "Product attributes")
+M("m_attribute_value", "product.attribute.value", "Attribute values")
+M("m_product_tmpl", "product.template", "Product templates + props (cost etc.)", hook=hook_product_tmpl,
+  extra_read=["detailed_type", "type"], sel_map={"type": {"product": "consu"}}, batch=300)
+M("m_ptal", "product.template.attribute.line", "Template attribute lines")
+M("m_ptav", "product.template.attribute.value", "Template attribute values")
+M("m_product", "product.product", "Product variants (m2m attribute combos ke saath)", batch=500)
+M("m_supplierinfo", "product.supplierinfo", "Vendor prices", batch=500)
+M("m_pricelist", "product.pricelist", "Pricelists")
+M("m_pricelist_item", "product.pricelist.item", "Pricelist rules", batch=500)
+M("m_stock_location", "stock.location", "Stock locations")
+M("m_orderpoint", "stock.warehouse.orderpoint", "Reorder rules")
+M("m_pos_pm", "pos.payment.method", "POS payment methods")
+M("m_pos_config", "pos.config", "POS configs (sirf active)", where="active")
+M("m_partner_bank", "res.partner.bank", "Partner bank accounts")
+
+MASTERS = ["m_partner_cat", "m_partner_industry", "m_partner", "m_uom", "m_uom2", "m_prod_category", "m_pos_category",
+           "m_analytic_plan", "m_analytic_account", "m_attribute", "m_attribute_value", "m_product_tmpl", "m_ptal",
+           "m_ptav", "m_product", "m_supplierinfo", "m_pricelist", "m_pricelist_item", "m_stock_location",
+           "m_orderpoint", "m_pos_pm", "m_pos_config", "m_partner_bank"]
 
 
 # ============================================================================ runners
@@ -365,12 +479,12 @@ add(Spec("sequences", "ir.sequence", "Sequences (naye documents ke liye)", runne
 
 CORE = ["crm", "sales", "purchases", "moves", "payments", "statement_lines", "reconcile", "links", "analytic",
         "pos_sessions", "pos_orders", "stock_onhand", "sequences"]
-GROUPS = {"core": CORE,
+GROUPS = {"core": CORE, "masters": MASTERS,
           "hr": ["attendance", "allocations", "leaves", "expense_sheets", "expenses", "payslip_runs", "payslips"],
           "pos": ["pos_sessions", "pos_orders"],
-          "all": CORE + ["attendance", "allocations", "leaves", "expense_sheets", "expenses", "payslip_runs",
+          "all": MASTERS + CORE + ["attendance", "allocations", "leaves", "expense_sheets", "expenses", "payslip_runs",
                          "payslips"]}
-ORDER = list(SPECS)
+ORDER = MASTERS + [n for n in SPECS if n not in MASTERS]
 
 
 def models_in_specs():
@@ -413,6 +527,9 @@ def _norm(x):
 
 
 def _key_expr(db, model, table, col):
+    cols = db.columns(table)
+    if col not in cols and (col + "_store") in cols:      # Odoo 18+: account.code -> code_store jsonb
+        return sql.SQL("(select value from jsonb_each_text({c}) limit 1)").format(c=ident(col + "_store"))
     meta = db.fields(model).get(col, {})
     if db.columns(table).get(col, {}).get("fam") == "json" and meta.get("translate"):
         return sql.SQL("coalesce({c}->>%s, (select value from jsonb_each_text({c}) limit 1))").format(c=ident(col))
@@ -436,7 +553,7 @@ def fix_model(eng, model):
     if not (src.has_table(st) and dst.has_table(dt)):
         return 0
     sc, dc = src.columns(st), dst.columns(dt)
-    keys = [k for k in KEYS.get(model, []) if all(f in sc and f in dc for f in k)]
+    keys = [k for k in KEYS.get(model, []) if all(f in sc and (f in dc or (f + "_store") in dc) for f in k)]
     if not keys:
         return 0
     done = eng.idmap.done(model) | set(eng.xmlid_map(model))
@@ -466,6 +583,7 @@ def fix_model(eng, model):
                 index[k][v].append(r["id"])
     claimed = eng.idmap.dst_ids(model)
     n = 0
+    left = []
     for r in srows:
         for k in keys:
             v = kv(r, k, "src")
@@ -477,6 +595,23 @@ def fix_model(eng, model):
                 claimed.add(cand[0])
                 n += 1
                 break
+        else:
+            left.append(r)
+    # duplicates: source mein 2 (ya zyada) records ki key same aur dst mein bhi utne hi -> id ki tarteeb se jorho
+    for k in keys:
+        grp = collections.defaultdict(list)
+        for r in left:
+            if eng.idmap.get(model, r["id"]) is None:
+                v = kv(r, k, "src")
+                if v:
+                    grp[v].append(r)
+        for v, rs in grp.items():
+            cand = sorted(i for i in index[k].get(v, []) if i not in claimed)
+            if len(cand) == len(rs):
+                for r, d in zip(rs, cand):
+                    eng.idmap.set_direct(model, r["id"], d, created=False)
+                    claimed.add(d)
+                    n += 1
     return n
 
 
@@ -543,7 +678,7 @@ def fix_repartition(eng):
             used = set()
             for sr in srows:
                 m = next((d for d in drows if d["id"] not in used and d["repartition_type"] == sr["repartition_type"]
-                          and abs((d["factor_percent"] or 0) - (sr["factor_percent"] or 0)) < 0.001), None)
+                          and abs(float(d["factor_percent"] or 0) - float(sr["factor_percent"] or 0)) < 0.001), None)
                 acc = eng.resolve("account.account", sr.get("account_id")) if sr.get("account_id") else None
                 if m:
                     used.add(m["id"])
@@ -684,12 +819,34 @@ def cmd_rollback(eng, steps):
     dst = eng.dst
     for name in reversed(steps):
         sp = SPECS[name]
-        if sp.runner:
+        if name == "reconcile":
+            models = [("account.full.reconcile",) * 2, ("account.partial.reconcile",) * 2]
+        elif sp.runner:
             continue
-        models = [(c.model, c.dst_model) for c in reversed(sp.children)] + [(sp.model, sp.dst_model)]
+        else:
+            models = [(c.model, c.dst_model) for c in reversed(sp.children)] + [(sp.model, sp.dst_model)]
         for sm, dm in models:
             dt = dm.replace(".", "_")
             n = dst.x(sql.SQL("delete from {t} where id in (select dst_id from akg_idmap where model = %s and created)").format(
                 t=ident(dt)).as_string(dst.cx), (canon(sm),))
             dst.x("delete from akg_idmap where model = %s and created", (canon(sm),))
+            dst.x("delete from akg_pending where dst_table = %s", (dt,))
             log.info("[rollback] %s: %d rows delete", dm, n)
+
+
+PREFLIGHT = ["account.account", "account.journal", "account.tax", "res.partner", "product.product", "uom.uom"]
+
+
+def preflight(eng):
+    """--apply se pehle: zaroori masters map hone chahiye, warna documents skip/adhoore columns ke saath jayenge"""
+    bad = []
+    for model in PREFLIGHT:
+        t = model.replace(".", "_")
+        if not (eng.src.has_table(t) and eng.dst.has_table(t)):
+            continue
+        ids = {r["id"] for r in eng.src.q(sql.SQL("select id from {t}").format(t=ident(t)).as_string(eng.src.cx))}
+        done = eng.idmap.done(model) | set(eng.xmlid_map(model))
+        pct = 100.0 * len(ids & done) / max(len(ids), 1)
+        if pct < 95:
+            bad.append("%s: sirf %.0f%% map (%d/%d)" % (model, pct, len(ids & done), len(ids)))
+    return bad
