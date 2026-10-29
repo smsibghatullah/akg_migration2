@@ -528,14 +528,14 @@ KEYS = {
     "res.country.state": [("country_id", "code")], "res.partner.category": [("name",)],
     "res.partner": [("ref",), ("vat", "name"), ("email", "name"), ("phone", "name"), ("name",)],
     "res.users": [("login",)], "hr.employee": [("work_email", "name"), ("name",)],
-    "product.category": [("complete_name",)], "uom.uom": [("name",)],
+    "product.category": [("complete_name",), ("name", "parent_id")], "uom.uom": [("name",)],
     "product.template": [("default_code", "name"), ("name",)],
     "product.product": [("default_code",), ("barcode",), ("name",)],
     "product.pricelist": [("name",)], "account.account": [("code",)], "account.journal": [("code",)],
     "account.tax": [("name", "type_tax_use")], "account.payment.term": [("name",)],
     "account.fiscal.position": [("name",)], "account.analytic.account": [("name",)],
     "account.payment.method.line": [("journal_id", "payment_method_id", "name")],
-    "stock.warehouse": [("code",)], "stock.location": [("complete_name",), ("barcode",)], "crm.stage": [("name",)],
+    "stock.warehouse": [("code",)], "stock.warehouse.orderpoint": [("product_id", "location_id")], "stock.location": [("complete_name",), ("barcode",)], "crm.stage": [("name",)],
     "crm.team": [("name",)], "crm.lost.reason": [("name",)], "utm.source": [("name",)],
     "utm.medium": [("name",)], "utm.campaign": [("name",)], "hr.leave.type": [("name",)],
     "pos.config": [("name",)], "pos.payment.method": [("name",)], "pos.category": [("name",)],
@@ -596,10 +596,13 @@ def fix_model(eng, model):
             if sf.get(f, {}).get("ttype") == "many2one" and v:
                 v = eng.resolve(sf[f]["relation"], v) if side == "src" else v
             v = _norm(v) if isinstance(v, str) else v
+            if sf.get(f, {}).get("ttype") == "many2one" and not v:
+                out.append(0)            # khali parent (root) bhi key ka hissa hai
+                continue
             if v in (False, None, "", 0):
                 return None
             out.append(v)
-        return tuple(out)
+        return tuple(out) if any(out) else None
     index = {k: collections.defaultdict(list) for k in keys}
     for r in drows:
         for k in keys:
@@ -722,7 +725,13 @@ def cmd_check(eng, fix):
         if not eng.src.has_table(st) or not eng.dst.has_table(dt):
             print("%-30s  (table nahi: %s)" % (model, "source" if not eng.src.has_table(st) else "destination"))
             continue
-        fixed = fix_model(eng, model) if fix else 0
+        fixed = 0
+        if fix:
+            for _ in range(8):           # parent pehle map hon to bachon ki key resolve hoti hai
+                n = fix_model(eng, model)
+                fixed += n
+                if not n:
+                    break
         total = eng.src.scalar(sql.SQL("select count(*) from {t}").format(t=ident(st)).as_string(eng.src.cx))
         done = eng.idmap.done(model) | set(eng.xmlid_map(model))
         ids = {r["id"] for r in eng.src.q(sql.SQL("select id from {t}").format(t=ident(st)).as_string(eng.src.cx))}

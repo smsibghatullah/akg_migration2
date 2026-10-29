@@ -579,7 +579,15 @@ class Engine:
             elif m["fam"] in ("int", "num"):
                 out[c] = 0
             elif m["fam"] == "text":
-                out[c] = ""
+                sel = self.dst.q1("select s.value from ir_model_fields_selection s join ir_model_fields f on f.id = s.field_id "
+                                  "where f.model = %s and f.name = %s order by s.sequence, s.id limit 1",
+                                  (plan.dmodel, c))
+                if sel:
+                    out[c] = sel["value"]
+                    log.warning("[autofill %s] %s: table khali, selection ki PEHLI value '%s' li - sahi hai ya nahi CHECK karo",
+                                plan.dst_table, c, sel["value"])
+                else:
+                    log.error("[autofill %s] %s: koi value nahi mili - hook chahiye (documents fail honge)", plan.dst_table, c)
         if out:
             log.info("[autofill %s] source mein nahi, dst ki aam value lagi: %s", plan.dst_table,
                      ", ".join("%s=%r" % kv for kv in out.items()))
@@ -666,8 +674,6 @@ class Engine:
                             v = False
                         elif m["fam"] in ("int", "num"):
                             v = 0
-                        elif m["fam"] == "text":
-                            v = ""
                 use[k] = v
             groups[tuple(sorted(use))].append(use)
         for sig, grp in groups.items():
@@ -900,7 +906,8 @@ class Engine:
                     self.add_result(spec.name, spec.model, sid, "SKIP", "hook ne skip kiya")
                     continue
             for k, v in getattr(ph, "autofill", {}).items():
-                vals.setdefault(k, v)
+                if vals.get(k) is None:
+                    vals[k] = v
             cdocs, cpend = [], []
             for ch, p in pcs.items():
                 for cr in child_rows[ch].get(sid, []):
@@ -912,7 +919,8 @@ class Engine:
                             self.idmap.unput(ch.model, cr["id"])
                             continue
                     for k, v in getattr(p, "autofill", {}).items():
-                        cv.setdefault(k, v)
+                        if cv.get(k) is None:
+                            cv[k] = v
                     unres += cu
                     cdocs.append((ch, p, cr, cv))
                     cpend += [(p.dst_table, self.idmap.get(ch.model, cr["id"]), a, b, c) for (a, b, c) in cp]
