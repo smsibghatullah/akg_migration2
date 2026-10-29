@@ -262,6 +262,31 @@ def hook_product_tmpl(row, vals, ctx):
         vals["is_storable"] = (dt == "product")
     if row.get("type") == "product":
         vals["type"] = "consu"
+    if ctx.has("product_template", "is_favorite") and row.get("priority") is not None:
+        vals["is_favorite"] = str(row["priority"]) == "1"
+    return vals
+
+
+def post_product_tmpl(row, did, ctx):
+    """pos_categ_id -> pos_categ_ids (m2m), uom_po_id -> uom_ids (agar dst mein ye fields hon)"""
+    dfields = ctx.dst.fields("product.template")
+    if row.get("pos_categ_id") and "pos_categ_ids" in dfields:
+        c = ctx.resolve("pos.category", row["pos_categ_id"])
+        if c:
+            ctx.m2m_insert("product.template", "pos_categ_ids", did, [c])
+    if "uom_ids" in dfields:
+        ids = {ctx.resolve("uom.uom", row.get(k)) for k in ("uom_id", "uom_po_id") if row.get(k)}
+        ids.discard(None)
+        ctx.m2m_insert("product.template", "uom_ids", did, sorted(ids))
+
+
+def hook_supplierinfo(row, vals, ctx):
+    """Odoo 20: uom_id zaroori -> product template ki uom"""
+    if vals.get("uom_id") is None and vals.get("product_tmpl_id") and "uom_id" in ctx.dst.columns("product_supplierinfo"):
+        r = ctx.dst.q1("select uom_id from product_template where id = %s", (vals["product_tmpl_id"],)) \
+            if "uom_id" in ctx.dst.columns("product_template") else None
+        if r and r["uom_id"]:
+            vals["uom_id"] = r["uom_id"]
     return vals
 
 
@@ -297,11 +322,11 @@ M("m_analytic_account", "account.analytic.account", "Analytic accounts")
 M("m_attribute", "product.attribute", "Product attributes")
 M("m_attribute_value", "product.attribute.value", "Attribute values")
 M("m_product_tmpl", "product.template", "Product templates + props (cost etc.)", hook=hook_product_tmpl,
-  extra_read=["detailed_type", "type"], sel_map={"type": {"product": "consu"}}, batch=300)
+  post=post_product_tmpl, extra_read=["detailed_type", "type", "pos_categ_id", "uom_id", "uom_po_id", "priority"], sel_map={"type": {"product": "consu"}}, batch=300)
 M("m_ptal", "product.template.attribute.line", "Template attribute lines")
 M("m_ptav", "product.template.attribute.value", "Template attribute values")
 M("m_product", "product.product", "Product variants (m2m attribute combos ke saath)", batch=500)
-M("m_supplierinfo", "product.supplierinfo", "Vendor prices", batch=500)
+M("m_supplierinfo", "product.supplierinfo", "Vendor prices", hook=hook_supplierinfo, batch=500)
 M("m_pricelist", "product.pricelist", "Pricelists")
 M("m_pricelist_item", "product.pricelist.item", "Pricelist rules", batch=500)
 M("m_stock_location", "stock.location", "Stock locations")
@@ -510,7 +535,7 @@ KEYS = {
     "account.tax": [("name", "type_tax_use")], "account.payment.term": [("name",)],
     "account.fiscal.position": [("name",)], "account.analytic.account": [("name",)],
     "account.payment.method.line": [("journal_id", "payment_method_id", "name")],
-    "stock.warehouse": [("code",)], "stock.location": [("complete_name",)], "crm.stage": [("name",)],
+    "stock.warehouse": [("code",)], "stock.location": [("complete_name",), ("barcode",)], "crm.stage": [("name",)],
     "crm.team": [("name",)], "crm.lost.reason": [("name",)], "utm.source": [("name",)],
     "utm.medium": [("name",)], "utm.campaign": [("name",)], "hr.leave.type": [("name",)],
     "pos.config": [("name",)], "pos.payment.method": [("name",)], "pos.category": [("name",)],

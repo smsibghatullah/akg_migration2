@@ -529,7 +529,7 @@ class Engine:
                 continue
             elif sm["fam"] == "json" and dm["fam"] == "json":
                 kind = "json"
-            elif kind != "tr":
+            elif kind != "tr" and not cd:
                 if not self.compatible(sm["fam"], dm["fam"]):
                     dropped.append("%s (%s->%s)" % (sc, sm["type"], dm["type"]))
                     continue
@@ -561,6 +561,30 @@ class Engine:
         p = Plan(cols, dropped, miss, st, dt, smodel, dmodel, rename)
         self._plans[key] = p
         return p
+
+    def autofill(self, plan):
+        """dst ke NOT NULL columns jin ki value source mein nahi: Odoo 20 ke apne maujooda rows ki sabse aam value.
+        *_id (foreign key) columns kabhi autofill nahi hote - wahan hook chahiye."""
+        out, cols = {}, self.dst.columns(plan.dst_table)
+        for c in plan.missing_required:
+            m = cols[c]
+            if m["fam"] == "json" or c.endswith("_id") or c in ("create_date", "write_date"):
+                continue
+            r = self.dst.q1(sql.SQL("select {c} as v, count(*) n from {t} where {c} is not null group by 1 "
+                                    "order by 2 desc limit 1").format(c=ident(c), t=ident(plan.dst_table)).as_string(self.dst.cx))
+            if r:
+                out[c] = r["v"]
+            elif m["fam"] == "bool":
+                out[c] = False
+            elif m["fam"] in ("int", "num"):
+                out[c] = 0
+            elif m["fam"] == "text":
+                out[c] = ""
+        if out:
+            log.info("[autofill %s] source mein nahi, dst ki aam value lagi: %s", plan.dst_table,
+                     ", ".join("%s=%r" % kv for kv in out.items()))
+        plan.autofill = out
+        return out
 
     @staticmethod
     def compatible(a, b):
@@ -721,7 +745,8 @@ class Engine:
                     val = m.get(comp, next(iter(m.values())))
                     rows.append((d, val))
             if rows:
-                q = sql.SQL("update {t} x set {c} = v.val from (values %s) as v(id, val) where x.id = v.id").format(
+                cast = "::jsonb" if c.cd else ""
+                q = sql.SQL("update {t} x set {c} = v.val" + cast + " from (values %s) as v(id, val) where x.id = v.id").format(
                     t=ident(plan.dst_table), c=ident(c.dc)).as_string(self.dst.cx)
                 self.dst.ev(q, rows, 1000)
 
@@ -781,6 +806,9 @@ class Engine:
             pcs[ch].fk_dc = fk_dc
             pcs[ch].missing_required = [c for c in pcs[ch].missing_required if c != fk_dc]
         self.report_plan(spec, ph, pcs)
+        self.autofill(ph)
+        for p in pcs.values():
+            self.autofill(p)
         ids = self.select_ids(spec, st)
         done = self.idmap.done(smodel) | set(self.xmlid_map(smodel))
         todo = [i for i in ids if i not in done]
@@ -871,6 +899,8 @@ class Engine:
                     self._drop_doc(spec, r, child_rows)
                     self.add_result(spec.name, spec.model, sid, "SKIP", "hook ne skip kiya")
                     continue
+            for k, v in getattr(ph, "autofill", {}).items():
+                vals.setdefault(k, v)
             cdocs, cpend = [], []
             for ch, p in pcs.items():
                 for cr in child_rows[ch].get(sid, []):
@@ -881,6 +911,8 @@ class Engine:
                         if cv is None:
                             self.idmap.unput(ch.model, cr["id"])
                             continue
+                    for k, v in getattr(p, "autofill", {}).items():
+                        cv.setdefault(k, v)
                     unres += cu
                     cdocs.append((ch, p, cr, cv))
                     cpend += [(p.dst_table, self.idmap.get(ch.model, cr["id"]), a, b, c) for (a, b, c) in cp]
