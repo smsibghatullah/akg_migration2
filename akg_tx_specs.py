@@ -29,16 +29,17 @@ def _locked_state(ctx, table, vals, row, done_to):
 
 
 def pick_sel(ctx, model, field, prefs):
+    """sirf unhi preferred values mein se jo dst mein sach mein hon; warna None (andaza nahi)"""
     allowed = ctx.dst.selection(model, field)
     for p in prefs:
         if p in allowed:
             return p
-    return sorted(allowed)[0] if allowed else None
+    return None
 
 
 def _tax_mode(ctx, table, model, vals):
     if ctx.has(table, "document_tax_mode") and vals.get("document_tax_mode") is None:
-        vals["document_tax_mode"] = pick_sel(ctx, model, "document_tax_mode", ["tax_excluded", "excluded", "line"])
+        vals["document_tax_mode"] = pick_sel(ctx, model, "document_tax_mode", ["tax_excluded"])
     return vals
 
 
@@ -120,7 +121,7 @@ def _posted_names(ctx):
 
 def hook_move(row, vals, ctx):
     if ctx.has("account_move", "review_state") and vals.get("review_state") is None:
-        vals["review_state"] = pick_sel(ctx, "account.move", "review_state", ["no", "none", "done", "reviewed"])
+        vals["review_state"] = pick_sel(ctx, "account.move", "review_state", ["no_review"])
     """Odoo 20: posted move ka naam journal mein unique. Odoo 16 mein invoice/refund ka naam same ho sakta tha."""
     if row.get("state") != "posted" or not vals.get("name") or vals["name"] == "/":
         return vals
@@ -164,9 +165,14 @@ def hook_payment(row, vals, ctx):
     if m is None:
         return None
     if ctx.has("account_payment", "state") and vals.get("state") is None:
-        want = {"draft": "draft", "cancel": "canceled"}.get(m["state"]) or ("paid" if row.get("is_matched") else "in_process")
+        if m["state"] == "draft":
+            want = "draft"
+        elif m["state"] == "cancel":
+            want = "canceled"
+        else:
+            want = "reconciled" if row.get("is_reconciled") else "paid"
         allowed = ctx.dst.selection("account.payment", "state")
-        vals["state"] = want if (not allowed or want in allowed) else pick_sel(ctx, "account.payment", "state", ["paid", "posted"])
+        vals["state"] = want if (not allowed or want in allowed) else pick_sel(ctx, "account.payment", "state", ["paid"])
     return vals
 
 
@@ -216,7 +222,7 @@ add(Spec("moves", "account.move", "Invoices, bills, journal entries (lines ke sa
                          extra_read=["tax_line_id", "account_id", "display_type"])]))
 
 add(Spec("payments", "account.payment", "Payments (migrated move se link)", strict=["partner_id", "journal_id", "move_id"],
-         hook=hook_payment, extra_read=["is_matched"], date_col=("date", False), compare=["amount"], batch=500))
+         hook=hook_payment, extra_read=["is_matched", "is_reconciled"], date_col=("date", False), compare=["amount"], batch=500))
 
 add(Spec("statement_lines", "account.bank.statement.line", "Bank statement lines (migrated move se link)",
          strict=["journal_id", "move_id"], hook=hook_statement_line, date_col=("date", False), batch=500))
