@@ -6,6 +6,7 @@ suspense balances ...) un ka hal yahan pehle se shamil hai.
 """
 import collections
 import datetime
+import decimal
 import logging
 import re
 
@@ -120,6 +121,9 @@ def _posted_names(ctx):
 
 
 def hook_move(row, vals, ctx):
+    if ctx.has("account_move", "document_tax_mode") and vals.get("document_tax_mode") is None \
+            and row.get("move_type") != "entry":
+        vals["document_tax_mode"] = pick_sel(ctx, "account.move", "document_tax_mode", ["tax_excluded"])
     if ctx.has("account_move", "review_state") and vals.get("review_state") is None:
         vals["review_state"] = pick_sel(ctx, "account.move", "review_state", ["no_review"])
     """Odoo 20: posted move ka naam journal mein unique. Odoo 16 mein invoice/refund ka naam same ho sakta tha."""
@@ -286,6 +290,24 @@ def post_product_tmpl(row, did, ctx):
         ctx.m2m_insert("product.template", "uom_ids", did, sorted(ids))
 
 
+def hook_variant(row, vals, ctx):
+    """combination_indices source ke attribute-value ids se bana hai - dst ids alag hain -> post mein dobara"""
+    if "combination_indices" in vals:
+        vals["combination_indices"] = None
+    return vals
+
+
+def post_variant(row, did, ctx):
+    if not ctx.has("product_product", "combination_indices"):
+        return
+    f = ctx.dst.fields("product.product").get("product_template_attribute_value_ids")
+    ids = []
+    if f and f.get("relation_table"):
+        ids = [r["b"] for r in ctx.dst.q(sql.SQL("select {b} b from {t} where {a} = %s order by {b}").format(
+            t=ident(f["relation_table"]), a=ident(f["column1"]), b=ident(f["column2"])).as_string(ctx.dst.cx), (did,))]
+    ctx.dst.x("update product_product set combination_indices = %s where id = %s", (",".join(str(i) for i in ids), did))
+
+
 def hook_supplierinfo(row, vals, ctx):
     """Odoo 20: uom_id zaroori -> product template ki uom"""
     if vals.get("uom_id") is None and vals.get("product_tmpl_id") and "uom_id" in ctx.dst.columns("product_supplierinfo"):
@@ -331,7 +353,8 @@ M("m_product_tmpl", "product.template", "Product templates + props (cost etc.)",
   post=post_product_tmpl, extra_read=["detailed_type", "type", "pos_categ_id", "uom_id", "uom_po_id", "priority"], sel_map={"type": {"product": "consu"}}, batch=300)
 M("m_ptal", "product.template.attribute.line", "Template attribute lines")
 M("m_ptav", "product.template.attribute.value", "Template attribute values")
-M("m_product", "product.product", "Product variants (m2m attribute combos ke saath)", batch=500)
+M("m_product", "product.product", "Product variants (m2m attribute combos ke saath)", hook=hook_variant,
+  post=post_variant, batch=500)
 M("m_supplierinfo", "product.supplierinfo", "Vendor prices", hook=hook_supplierinfo, batch=500)
 M("m_pricelist", "product.pricelist", "Pricelists")
 M("m_pricelist_item", "product.pricelist.item", "Pricelist rules", batch=500)
@@ -602,6 +625,9 @@ def fix_model(eng, model):
             if sf.get(f, {}).get("ttype") == "many2one" and v:
                 v = eng.resolve(sf[f]["relation"], v) if side == "src" else v
             v = _norm(v) if isinstance(v, str) else v
+            if isinstance(v, (int, float, decimal.Decimal)) and not isinstance(v, bool) \
+                    and sf.get(f, {}).get("ttype") != "many2one":
+                v = round(float(v), 4)
             if sf.get(f, {}).get("ttype") == "many2one" and not v:
                 out.append(0)            # khali parent (root) bhi key ka hissa hai
                 continue
