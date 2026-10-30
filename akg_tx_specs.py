@@ -242,8 +242,10 @@ add(Spec("leaves", "hr.leave", "Leaves", strict=["employee_id", "holiday_status_
 add(Spec("expense_sheets", "hr.expense.sheet", "Expense reports", strict=["employee_id"], group="hr"))
 add(Spec("expenses", "hr.expense", "Expenses", strict=["employee_id"], group="hr"))
 add(Spec("payslip_runs", "hr.payslip.run", "Payslip batches", group="hr"))
+# Odoo 20: contract_id -> version_id (hr.contract -> hr.version); state 'verify' dst mein nahi
 add(Spec("payslips", "hr.payslip", "Payslips + lines", strict=["employee_id"], group="hr",
-         children=[Child("hr.payslip.line", "slip_id", strict=[])]))
+         rename={"contract_id": "version_id"}, sel_map={"state": {"verify": "draft"}},
+         children=[Child("hr.payslip.line", "slip_id", strict=[], rename={"contract_id": "version_id"})]))
 
 add(Spec("pos_sessions", "pos.session", "POS sessions", strict=["config_id", "user_id", "company_id"],
          date_col=("start_at", True), batch=500, group="pos",
