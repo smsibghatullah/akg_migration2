@@ -474,6 +474,52 @@ def run_stock_onhand(eng):
     log.info("[stock_onhand] insert %d | pehle se barabar %d | skip %d", ok, same, skip)
 
 
+def run_leave_types(eng):
+    """Odoo 20 mein hr.leave.type nahi, leave types = hr.work.entry.type. Jo source leave types dst mein map nahi unhe
+    ek maujooda leave work-entry-type ki COPY bana kar (NOT NULL/selection columns sahi rahein) naam/code lagao."""
+    src, dst = eng.src, eng.dst
+    if not (src.has_table("hr_leave_type") and dst.has_table("hr_work_entry_type")):
+        log.warning("[leave_types] table nahi (source hr_leave_type / dst hr_work_entry_type)")
+        return
+    dcols = dst.columns("hr_work_entry_type")
+    done = eng.idmap.done("hr.leave.type") | set(eng.xmlid_map("hr.leave.type"))
+    todo = [r for r in src.q("select * from hr_leave_type order by id") if r["id"] not in done]
+    log.info("== leave_types: source %d | map nahi, banane hain: %d", len(src.q("select id from hr_leave_type")), len(todo))
+    if not todo:
+        return
+    tpl = dst.q1("select * from hr_work_entry_type where is_leave order by id limit 1") if "is_leave" in dcols \
+        else dst.q1("select * from hr_work_entry_type order by id limit 1")
+    if not tpl:
+        log.error("[leave_types] dst mein template (koi bhi work entry type) nahi mila")
+        return
+    for r in todo:
+        vals = {k: v for k, v in tpl.items() if k not in ("id", "create_date", "write_date")}
+        for k, v in list(vals.items()):
+            if isinstance(v, (dict, list)):
+                vals[k] = Json(v)
+        nm = r.get("name")
+        if dcols["name"]["fam"] == "json":
+            vals["name"] = Json(nm if isinstance(nm, dict) else {eng.base_lang: nm})
+        else:
+            vals["name"] = nm.get(eng.base_lang) if isinstance(nm, dict) else nm
+        if "code" in dcols:
+            vals["code"] = "OMLT%d" % r["id"]
+        if "external_code" in vals:
+            vals["external_code"] = None
+        if "is_leave" in dcols:
+            vals["is_leave"] = True
+        if "active" in dcols:
+            vals["active"] = True
+        if "create_uid" in dcols:
+            vals["create_uid"] = vals["write_uid"] = 1
+        did = eng.insert_one("hr_work_entry_type", vals)
+        eng.idmap.set_direct("hr.leave.type", r["id"], did, created=True)
+        eng.add_result("leave_types", "hr.leave.type", r["id"], "OK", "dst work entry type=%s" % did)
+        log.info("[leave_types] #%s %s -> work entry type %s (code OMLT%d)", r["id"], nm if not isinstance(nm, dict) else nm.get(eng.base_lang), did, r["id"])
+    if eng.args.apply:
+        dst.cx.commit()
+
+
 SEQ_CODES = ("sale.order", "purchase.order", "pos.session", "crm.lead")
 
 
@@ -525,6 +571,8 @@ def run_parent_paths(eng):
                 log.info("[parent_path] %s: %d rows", t, n)
 
 
+add(Spec("leave_types", "hr.leave.type", "Leave types -> work entry types (jo dst mein nahi)", runner=run_leave_types,
+         group="hr"))
 add(Spec("reconcile", "account.partial.reconcile", "Reconciliation (partial + full)", runner=run_reconcile))
 add(Spec("links", "sale.order", "sale/purchase <-> invoice links (moves ke baad)", runner=run_links))
 add(Spec("stock_onhand", "stock.quant", "Stock on-hand quantity (internal locations)", runner=run_stock_onhand,
@@ -534,11 +582,13 @@ add(Spec("sequences", "ir.sequence", "Sequences (naye documents ke liye)", runne
 CORE = ["crm", "sales", "purchases", "moves", "payments", "statement_lines", "reconcile", "links", "analytic",
         "pos_sessions", "pos_orders", "stock_onhand", "sequences"]
 GROUPS = {"core": CORE, "masters": MASTERS,
-          "hr": ["attendance", "allocations", "leaves", "expense_sheets", "expenses", "payslip_runs", "payslips"],
+          "hr": ["leave_types", "attendance", "allocations", "leaves", "expense_sheets", "expenses", "payslip_runs", "payslips"],
           "pos": ["pos_sessions", "pos_orders"],
-          "all": MASTERS + CORE + ["attendance", "allocations", "leaves", "expense_sheets", "expenses", "payslip_runs",
+          "all": MASTERS + CORE + ["leave_types", "attendance", "allocations", "leaves", "expense_sheets", "expenses", "payslip_runs",
                          "payslips"]}
 ORDER = MASTERS + [n for n in SPECS if n not in MASTERS]
+ORDER.remove("leave_types")
+ORDER.insert(ORDER.index("attendance"), "leave_types")
 
 
 def models_in_specs():
@@ -885,6 +935,11 @@ def cmd_rollback(eng, steps):
     dst = eng.dst
     for name in reversed(steps):
         sp = SPECS[name]
+        if name == "leave_types":
+            n = dst.x("delete from hr_work_entry_type where id in (select dst_id from akg_idmap where model = 'hr.leave.type' and created)")
+            dst.x("delete from akg_idmap where model = 'hr.leave.type' and created")
+            log.info("[rollback] hr_work_entry_type: %d rows delete", n)
+            continue
         if name == "reconcile":
             models = [("account.full.reconcile",) * 2, ("account.partial.reconcile",) * 2]
         elif sp.runner:
