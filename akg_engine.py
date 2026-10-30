@@ -672,7 +672,7 @@ class Engine:
                             continue            # DB default lag jayegi
                         if m["fam"] == "bool":
                             v = False
-                        elif m["fam"] in ("int", "num"):
+                        elif m["fam"] in ("int", "num") and not k.endswith("_id"):
                             v = 0
                 use[k] = v
             groups[tuple(sorted(use))].append(use)
@@ -863,6 +863,7 @@ class Engine:
                 by[r[ch.fk]].append(r)
             child_rows[ch] = by
         self.dst.x("savepoint sp_chunk")
+        n0, miss0 = len(self.results), self.missing.copy()
         try:
             out = self._insert_docs(spec, rows, child_rows, ph, pcs)
             self.idmap.flush()
@@ -875,6 +876,8 @@ class Engine:
             self.dst.x("rollback to savepoint sp_chunk")
             self.dst.x("release savepoint sp_chunk")
             self.idmap.reject()
+            del self.results[n0:]
+            self.missing = miss0
             if len(sids) > 1:
                 log.warning("[%s] batch fail (%s) - aik aik document karke dobara", spec.name, str(e)[:160])
                 for s in sids:
