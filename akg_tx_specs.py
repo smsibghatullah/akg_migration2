@@ -840,7 +840,8 @@ def cmd_check(eng, fix):
 # ============================================================================ idmap sanity (UAT idmap PROD par na lag jaye)
 SANITY = [("res.partner", "name"), ("account.account", "code"), ("account.journal", "code"), ("account.tax", "name"),
           ("product.product", "default_code"), ("uom.uom", "name"), ("product.category", "complete_name"),
-          ("stock.location", "complete_name"), ("res.users", "login"), ("pos.config", "name")]
+          ("stock.location", "complete_name"), ("res.users", "login")]
+# pos.config jaan-boojh kar many-to-one hai (644 source configs -> chand dst configs), is liye yahan nahi
 
 
 def sanity_idmap(eng):
