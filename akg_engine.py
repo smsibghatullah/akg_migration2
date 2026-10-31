@@ -150,8 +150,15 @@ class DB:
             self._sel[k] = {r["value"] for r in rows}
         return self._sel[k]
 
+    ALT_TABLES = {"stock_lot": ["stock_production_lot"], "stock_route": ["stock_location_route"]}
+
     def table_of(self, model):
-        return model.replace(".", "_")
+        t = model.replace(".", "_")
+        if not self.columns(t):
+            for a in self.ALT_TABLES.get(t, []):
+                if self.columns(a):
+                    return a
+        return t
 
     def version(self):
         r = self.q1("select latest_version v from ir_module_module where name = 'base'")

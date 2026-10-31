@@ -357,6 +357,7 @@ M("m_ptal", "product.template.attribute.line", "Template attribute lines")
 M("m_ptav", "product.template.attribute.value", "Template attribute values")
 M("m_product", "product.product", "Product variants (m2m attribute combos ke saath)", hook=hook_variant,
   post=post_variant, batch=500)
+M("m_stock_lot", "stock.lot", "Lots / Serial numbers", batch=500)
 M("m_supplierinfo", "product.supplierinfo", "Vendor prices", hook=hook_supplierinfo, batch=500)
 M("m_pricelist", "product.pricelist", "Pricelists")
 M("m_pricelist_item", "product.pricelist.item", "Pricelist rules", batch=500)
@@ -368,7 +369,7 @@ M("m_partner_bank", "res.partner.bank", "Partner bank accounts")
 
 MASTERS = ["m_partner_cat", "m_partner_industry", "m_partner", "m_uom", "m_uom2", "m_prod_category", "m_pos_category",
            "m_analytic_plan", "m_analytic_account", "m_attribute", "m_attribute_value", "m_product_tmpl", "m_ptal",
-           "m_ptav", "m_product", "m_supplierinfo", "m_pricelist", "m_pricelist_item", "m_stock_location",
+           "m_ptav", "m_product", "m_stock_lot", "m_supplierinfo", "m_pricelist", "m_pricelist_item", "m_stock_location",
            "m_orderpoint", "m_pos_pm", "m_pos_config", "m_partner_bank"]
 
 
@@ -394,10 +395,8 @@ def run_links(eng):
 
 
 def _lot_table(db):
-    for t in ("stock_lot", "stock_production_lot"):
-        if db.has_table(t):
-            return t
-    return None
+    t = db.table_of("stock.lot")
+    return t if db.has_table(t) else None
 
 
 def run_stock_onhand(eng):
@@ -623,6 +622,14 @@ KEYS = {
     "hr.work.entry.type": [("code",)], "hr.payroll.structure.type": [("name",)],
     "hr.payroll.structure": [("code",), ("name",)], "hr.salary.rule.category": [("code",)],
     "hr.salary.rule": [("code", "struct_id")], "approval.category": [("name",)],
+    # niche wale parents ke baad (m2o keys pehle map hone chahiye)
+    "stock.lot": [("name", "product_id")],
+    "product.attribute": [("name",)],
+    "product.attribute.value": [("name", "attribute_id")],
+    "product.template.attribute.line": [("product_tmpl_id", "attribute_id")],
+    "product.template.attribute.value": [("product_tmpl_id", "product_attribute_value_id")],
+    "product.supplierinfo": [("partner_id", "product_tmpl_id", "product_id", "min_qty", "price")],
+    "product.pricelist.item": [("pricelist_id", "product_tmpl_id", "product_id", "categ_id", "min_quantity", "fixed_price")],
 }
 DEPS = list(KEYS)
 MODEL_TABLE = {"hr.leave.type": "hr_leave_type"}
@@ -655,7 +662,7 @@ def _fetch_keys(db, model, table, flds, base_lang):
 
 def fix_model(eng, model):
     src, dst = eng.src, eng.dst
-    st, dt = MODEL_TABLE.get(model, model.replace(".", "_")), model.replace(".", "_")
+    st, dt = MODEL_TABLE.get(model) or src.table_of(model), dst.table_of(model)
     if not (src.has_table(st) and dst.has_table(dt)):
         return 0
     sc, dc = src.columns(st), dst.columns(dt)
@@ -805,7 +812,7 @@ def cmd_check(eng, fix):
     print("\n%-30s %8s %8s %8s %s" % ("model", "source", "mapped", "missing", "note"))
     rows = []
     for model in DEPS:
-        st, dt = MODEL_TABLE.get(model, model.replace(".", "_")), model.replace(".", "_")
+        st, dt = MODEL_TABLE.get(model) or eng.src.table_of(model), eng.dst.table_of(model)
         if not eng.src.has_table(st) or not eng.dst.has_table(dt):
             print("%-30s  (table nahi: %s)" % (model, "source" if not eng.src.has_table(st) else "destination"))
             continue
